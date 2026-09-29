@@ -214,6 +214,11 @@ def _get_openapi_operation_parameters(
                 "required": param.field_info.is_required(),
                 "schema": param_schema,
             }
+            style = getattr(field_info, "style", None)
+            if style is not None:
+                parameter["style"] = style
+                if style == "deepObject":
+                    parameter["explode"] = True
             if field_info.description:
                 parameter["description"] = field_info.description
             openapi_examples = getattr(field_info, "openapi_examples", None)

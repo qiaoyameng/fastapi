@@ -90,6 +90,7 @@ nav:
     - tutorial/query-params-str-validations.md
     - tutorial/path-params-numeric-validations.md
     - tutorial/query-param-models.md
+    - tutorial/query-params-deep-object.md
     - tutorial/body-multiple-params.md
     - tutorial/body-fields.md
     - tutorial/body-nested-models.md

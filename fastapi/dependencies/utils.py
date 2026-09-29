@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import re
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -158,8 +159,10 @@ def _get_flat_fields_from_params(fields: list[ModelField]) -> list[ModelField]:
     if not fields:
         return fields
     first_field = fields[0]
-    if len(fields) == 1 and lenient_issubclass(
-        first_field.field_info.annotation, BaseModel
+    if (
+        len(fields) == 1
+        and not _is_deep_object_field(first_field)
+        and lenient_issubclass(first_field.field_info.annotation, BaseModel)
     ):
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
         return fields_to_extract
@@ -777,6 +780,151 @@ def _get_multidict_value(
     return value
 
 
+_deep_object_key_pattern = re.compile(r"(?:\[[^\[\]]*\])+")
+_deep_object_segment_pattern = re.compile(r"\[([^\[\]]*)\]")
+
+
+def _is_deep_object_field(field: ModelField) -> bool:
+    return getattr(field.field_info, "style", None) == "deepObject"
+
+
+def _get_deep_object_error(
+    *, loc: tuple[str, ...], msg: str, input_value: Any
+) -> dict[str, Any]:
+    return {
+        "type": "deep_object_parsing",
+        "loc": loc,
+        "msg": msg,
+        "input": input_value,
+    }
+
+
+def _extract_deep_object_value(
+    *, field: ModelField, received_params: Mapping[str, Any] | QueryParams | Headers
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Extract the nested value of a `style="deepObject"` query parameter.
+
+    Expands bracket keys like `filter[range][min]=3` into nested dicts. Only
+    objects with scalar leaves are supported: arrays (empty segments or
+    repeated keys) and conflicting scalar/object paths produce deterministic
+    errors.
+    """
+    alias = get_validation_alias(field)
+    field_info = field.field_info
+    assert isinstance(field_info, params.Param), (
+        "Params must be subclasses of Param"
+    )
+    loc = (field_info.in_.value, alias)
+    errors: list[dict[str, Any]] = []
+    if isinstance(received_params, ImmutableMultiDict):
+        items: list[tuple[str, Any]] = received_params.multi_items()
+    else:
+        items = list(received_params.items())
+    root: dict[str, Any] = {}
+    root_value: Any = None
+    root_is_scalar = False
+    matched = False
+    for key, item_value in items:
+        if key == alias:
+            segments: list[str] | None = []
+        elif key.startswith(f"{alias}["):
+            remainder = key[len(alias) :]
+            if _deep_object_key_pattern.fullmatch(remainder):
+                segments = _deep_object_segment_pattern.findall(remainder)
+            else:
+                segments = None
+        else:
+            continue
+        matched = True
+        if segments is None:
+            errors.append(
+                _get_deep_object_error(
+                    loc=loc,
+                    msg=f"Invalid deepObject key: {key!r}",
+                    input_value=item_value,
+                )
+            )
+            continue
+        if any(segment == "" for segment in segments):
+            errors.append(
+                _get_deep_object_error(
+                    loc=loc,
+                    msg="deepObject query parameters do not support arrays",
+                    input_value=item_value,
+                )
+            )
+            continue
+        if root_is_scalar or (not segments and root):
+            errors.append(
+                _get_deep_object_error(
+                    loc=loc,
+                    msg=(
+                        "Conflicting deepObject values: cannot mix a scalar"
+                        f" value and an object for key: {alias!r}"
+                    ),
+                    input_value=item_value,
+                )
+            )
+            continue
+        if not segments:
+            root_is_scalar = True
+            root_value = item_value
+            continue
+        node = root
+        conflict = False
+        for segment in segments[:-1]:
+            existing = node.get(segment)
+            if existing is None:
+                new_node: dict[str, Any] = {}
+                node[segment] = new_node
+                node = new_node
+            elif isinstance(existing, dict):
+                node = existing
+            else:
+                conflict = True
+                break
+        if conflict:
+            errors.append(
+                _get_deep_object_error(
+                    loc=loc,
+                    msg=(
+                        "Conflicting deepObject values: cannot mix a scalar"
+                        f" value and an object for key: {key!r}"
+                    ),
+                    input_value=item_value,
+                )
+            )
+            continue
+        existing_leaf = node.get(segments[-1])
+        if existing_leaf is not None:
+            if isinstance(existing_leaf, dict):
+                msg = (
+                    "Conflicting deepObject values: cannot mix a scalar"
+                    f" value and an object for key: {key!r}"
+                )
+            else:
+                msg = "deepObject query parameters do not support arrays"
+            errors.append(
+                _get_deep_object_error(loc=loc, msg=msg, input_value=item_value)
+            )
+            continue
+        node[segments[-1]] = item_value
+    if errors or not matched:
+        if (
+            not errors
+            and field_info.is_required()
+            and lenient_issubclass(field_info.annotation, BaseModel)
+        ):
+            # Validate an empty object so that the model's own defaults and
+            # missing field errors are used, as with regular query parameter
+            # models.
+            return {}, []
+        return None, errors
+    if root_is_scalar:
+        return root_value, []
+    return root, []
+
+
 def request_params_to_args(
     fields: Sequence[ModelField],
     received_params: Mapping[str, Any] | QueryParams | Headers,
@@ -791,8 +939,10 @@ def request_params_to_args(
     fields_to_extract = fields
     single_not_embedded_field = False
     default_convert_underscores = True
-    if len(fields) == 1 and lenient_issubclass(
-        first_field.field_info.annotation, BaseModel
+    if (
+        len(fields) == 1
+        and not _is_deep_object_field(first_field)
+        and lenient_issubclass(first_field.field_info.annotation, BaseModel)
     ):
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
         single_not_embedded_field = True
@@ -850,12 +1000,20 @@ def request_params_to_args(
         return {first_field.name: v_}, errors_
 
     for field in fields:
-        value = _get_multidict_value(field, received_params)
         field_info = field.field_info
         assert isinstance(field_info, params.Param), (
             "Params must be subclasses of Param"
         )
         loc = (field_info.in_.value, get_validation_alias(field))
+        if _is_deep_object_field(field):
+            value, deep_object_errors = _extract_deep_object_value(
+                field=field, received_params=received_params
+            )
+            if deep_object_errors:
+                errors.extend(deep_object_errors)
+                continue
+        else:
+            value = _get_multidict_value(field, received_params)
         v_, errors_ = _validate_value_with_model_field(
             field=field, value=value, values=values, loc=loc
         )

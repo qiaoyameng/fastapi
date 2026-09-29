@@ -225,6 +225,7 @@ class Query(Param):  # type: ignore[misc]
         self,
         default: Any = Undefined,
         *,
+        style: str | None = None,
         default_factory: Callable[[], Any] | None = _Unset,
         annotation: Any | None = None,
         alias: str | None = None,
@@ -266,6 +267,12 @@ class Query(Param):  # type: ignore[misc]
         json_schema_extra: dict[str, Any] | None = None,
         **extra: Any,
     ):
+        if style is not None and style != "deepObject":
+            raise ValueError(
+                f"Invalid query parameter style: {style!r}. "
+                'Only "deepObject" is supported.'
+            )
+        self.style = style
         super().__init__(
             default=default,
             default_factory=default_factory,

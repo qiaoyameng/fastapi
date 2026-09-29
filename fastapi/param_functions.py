@@ -367,6 +367,22 @@ def Query(  # noqa: N802
         ),
     ] = Undefined,
     *,
+    style: Annotated[
+        str | None,
+        Doc(
+            """
+            The serialization style for the query parameter, following the
+            OpenAPI `style` options.
+
+            Use `"deepObject"` to receive a nested object (e.g. a Pydantic model)
+            from query parameters using bracket keys, like
+            `filter[name]=a&filter[range][min]=3`.
+
+            If not set, query parameters are handled as usual (OpenAPI `"form"`
+            style).
+            """
+        ),
+    ] = None,
     default_factory: Annotated[
         Callable[[], Any] | None,
         Doc(
@@ -667,6 +683,7 @@ def Query(  # noqa: N802
 ) -> Any:
     return params.Query(
         default=default,
+        style=style,
         default_factory=default_factory,
         alias=alias,
         alias_priority=alias_priority,
