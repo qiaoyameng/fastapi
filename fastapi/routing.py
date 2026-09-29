@@ -84,9 +84,11 @@ from fastapi.sse import (
 from fastapi.types import DecoratedCallable, IncEx
 from fastapi.utils import (
     create_model_field,
+    create_response_headers_field,
     generate_unique_id,
     get_value_or_default,
     is_body_allowed_for_status_code,
+    validate_response_headers,
 )
 from starlette import routing
 from starlette._exception_handler import wrap_app_handling_exceptions
@@ -372,12 +374,41 @@ def _build_response_args(
     return response_args
 
 
+def _merge_response_headers(target: Response, source: Response) -> None:
+    """
+    Merge the headers written to the injected response (by dependencies or the
+    endpoint) into a `Response` returned directly by the endpoint.
+
+    Merging rules:
+
+    * `Set-Cookie` headers are always appended, keeping each cookie on its own
+        line. They are never combined with or replaced by other headers.
+    * Any other header is only added if the returned response doesn't already
+        have a header with that name, i.e. headers set directly on the
+        returned `Response` take precedence over the ones written to the
+        injected response.
+    """
+    if target is source:
+        # The endpoint returned the injected response itself, its headers are
+        # already in place
+        return
+    existing = {name.lower() for name, _ in target.headers.raw}
+    merged: list[tuple[bytes, bytes]] = []
+    for name, value in source.headers.raw:
+        lowered = name.lower()
+        if lowered == b"set-cookie" or lowered not in existing:
+            merged.append((name, value))
+            existing.add(lowered)
+    target.headers.raw.extend(merged)
+
+
 def get_request_handler(
     dependant: Dependant,
     body_field: ModelField | None = None,
     status_code: int | None = None,
     response_class: type[Response] | DefaultPlaceholder = Default(JSONResponse),
     response_field: ModelField | None = None,
+    response_headers_field: ModelField | None = None,
     response_model_include: IncEx | None = None,
     response_model_exclude: IncEx | None = None,
     response_model_by_alias: bool = True,
@@ -711,6 +742,7 @@ def get_request_handler(
                 if isinstance(raw_response, Response):
                     if raw_response.background is None:
                         raw_response.background = solved_result.background_tasks
+                    _merge_response_headers(raw_response, solved_result.response)
                     response = raw_response
                 else:
                     response_args = _build_response_args(
@@ -756,6 +788,16 @@ def get_request_handler(
 
         # Return response
         assert response
+        if response_headers_field is not None:
+            # Validate the final headers (including the ones written by
+            # dependencies and by the endpoint) right before sending the
+            # response. This also applies to responses without a body (e.g.
+            # HEAD and 204) and to Response instances returned directly.
+            validate_response_headers(
+                field=response_headers_field,
+                raw_headers=response.headers.raw,
+                endpoint_ctx=endpoint_ctx,
+            )
         return response
 
     return app
@@ -920,6 +962,7 @@ class _APIRouteLike(Protocol):
     endpoint: Callable[..., Any]
     stream_item_type: Any | None
     response_model: Any
+    response_headers_model: Any
     summary: str | None
     response_description: str
     deprecated: bool | None
@@ -947,6 +990,7 @@ class _APIRouteLike(Protocol):
     unique_id: str
     status_code: int | None
     response_field: ModelField | None
+    response_headers_field: ModelField | None
     stream_item_field: ModelField | None
     dependencies: list[params.Depends]
     description: str
@@ -964,6 +1008,7 @@ def _populate_api_route_state(
     endpoint: Callable[..., Any],
     *,
     response_model: Any = Default(None),
+    response_headers_model: Any = None,
     status_code: int | None = None,
     tags: list[str | Enum] | None = None,
     dependencies: Sequence[params.Depends] | None = None,
@@ -1112,6 +1157,15 @@ def _populate_api_route_state(
         )
     else:
         route.response_field = None
+    route.response_headers_model = response_headers_model
+    if response_headers_model is not None:
+        response_headers_name = "ResponseHeaders_" + route.unique_id
+        route.response_headers_field = create_response_headers_field(
+            name=response_headers_name,
+            model=response_headers_model,
+        )
+    else:
+        route.response_headers_field = None
     if route.stream_item_type:
         stream_item_name = "StreamItem_" + route.unique_id
         route.stream_item_field = create_model_field(
@@ -1126,6 +1180,7 @@ def _populate_api_route_state(
 class APIRoute(routing.Route):
     stream_item_type: Any | None
     response_model: Any
+    response_headers_model: Any
     summary: str | None
     response_description: str
     deprecated: bool | None
@@ -1148,6 +1203,7 @@ class APIRoute(routing.Route):
     unique_id: str
     status_code: int | None
     response_field: ModelField | None
+    response_headers_field: ModelField | None
     stream_item_field: ModelField | None
     dependencies: list[params.Depends]
     description: str
@@ -1164,6 +1220,7 @@ class APIRoute(routing.Route):
         endpoint: Callable[..., Any],
         *,
         response_model: Any = Default(None),
+        response_headers_model: Any = None,
         status_code: int | None = None,
         tags: list[str | Enum] | None = None,
         dependencies: Sequence[params.Depends] | None = None,
@@ -1195,6 +1252,7 @@ class APIRoute(routing.Route):
             path,
             endpoint,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -1235,6 +1293,7 @@ class APIRoute(routing.Route):
             status_code=route.status_code,
             response_class=route.response_class,
             response_field=route.response_field,
+            response_headers_field=route.response_headers_field,
             response_model_include=route.response_model_include,
             response_model_exclude=route.response_model_exclude,
             response_model_by_alias=route.response_model_by_alias,
@@ -1379,6 +1438,7 @@ class _EffectiveRouteContext:
     endpoint: Callable[..., Any] | None = None
     stream_item_type: Any | None = None
     response_model: Any = None
+    response_headers_model: Any = None
     summary: str | None = None
     response_description: str = "Successful Response"
     deprecated: bool | None = None
@@ -1412,6 +1472,7 @@ class _EffectiveRouteContext:
     unique_id: str = ""
     status_code: int | None = None
     response_field: ModelField | None = None
+    response_headers_field: ModelField | None = None
     stream_item_field: ModelField | None = None
     dependencies: list[params.Depends] = field(default_factory=list)
     description: str = ""
@@ -1436,6 +1497,7 @@ class _EffectiveRouteContext:
             include_context.path_for(original_route),
             route.endpoint,
             response_model=route.response_model,
+            response_headers_model=route.response_headers_model,
             status_code=route.status_code,
             tags=[*include_context.tags, *route.tags],
             dependencies=[*include_context.dependencies, *route.dependencies],
@@ -2892,6 +2954,7 @@ class APIRouter(routing.Router):
         endpoint: Callable[..., Any],
         *,
         response_model: Any = Default(None),
+        response_headers_model: Any = None,
         status_code: int | None = None,
         tags: list[str | Enum] | None = None,
         dependencies: Sequence[params.Depends] | None = None,
@@ -2940,6 +3003,7 @@ class APIRouter(routing.Router):
             self.prefix + path,
             endpoint=endpoint,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=current_tags,
             dependencies=current_dependencies,
@@ -2975,6 +3039,7 @@ class APIRouter(routing.Router):
         path: str,
         *,
         response_model: Any = Default(None),
+        response_headers_model: Any = None,
         status_code: int | None = None,
         tags: list[str | Enum] | None = None,
         dependencies: Sequence[params.Depends] | None = None,
@@ -3005,6 +3070,7 @@ class APIRouter(routing.Router):
                 path,
                 func,
                 response_model=response_model,
+                response_headers_model=response_headers_model,
                 status_code=status_code,
                 tags=tags,
                 dependencies=dependencies,
@@ -3366,6 +3432,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -3672,6 +3762,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -3743,6 +3834,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -4054,6 +4169,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -4125,6 +4241,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -4436,6 +4576,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -4507,6 +4648,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -4813,6 +4978,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -4884,6 +5050,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -5190,6 +5380,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -5261,6 +5452,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -5572,6 +5787,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -5643,6 +5859,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -5954,6 +6194,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -6025,6 +6266,30 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -6336,6 +6601,7 @@ class APIRouter(routing.Router):
         return self.api_route(
             path=path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,

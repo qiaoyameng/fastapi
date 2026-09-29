@@ -1,9 +1,14 @@
+import collections.abc
 import re
+import types
 import warnings
 from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
+    Union,
+    get_args,
+    get_origin,
 )
 
 import fastapi
@@ -14,7 +19,13 @@ from fastapi._compat import (
     annotation_is_pydantic_v1,
 )
 from fastapi.datastructures import DefaultPlaceholder, DefaultType
-from fastapi.exceptions import FastAPIDeprecationWarning, PydanticV1NotSupportedError
+from fastapi.exceptions import (
+    EndpointContext,
+    FastAPIDeprecationWarning,
+    PydanticV1NotSupportedError,
+    ResponseValidationError,
+)
+from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
 from ._compat import v2
@@ -75,6 +86,124 @@ def create_model_field(
         raise fastapi.exceptions.FastAPIError(
             _invalid_args_message.format(type_=type_)
         ) from None
+
+
+def normalize_header_name(name: str) -> str:
+    """
+    Normalize a header name for case-insensitive matching, treating underscores
+    as dashes, so a Pydantic field `x_token` (or alias `X-Token`) matches the
+    `X-Token` HTTP header.
+    """
+    return name.strip().lower().replace("_", "-")
+
+
+def create_response_headers_field(*, name: str, model: Any) -> ModelField:
+    """
+    Create the field used to validate response headers against a
+    `response_headers_model` (a Pydantic model class).
+    """
+    if annotation_is_pydantic_v1(model):
+        raise PydanticV1NotSupportedError(
+            "pydantic.v1 models are no longer supported by FastAPI."
+            f" Please update the response headers model {model!r}."
+        )
+    if not (isinstance(model, type) and issubclass(model, BaseModel)):
+        raise fastapi.exceptions.FastAPIError(
+            "response_headers_model must be a Pydantic model class, "
+            f"got {model!r}."
+        )
+    return create_model_field(name=name, type_=model, mode="validation")
+
+
+def _is_repeated_header_annotation(annotation: Any) -> bool:
+    origin = get_origin(annotation)
+    if origin is None:
+        return False
+    if origin in (list, tuple, set, frozenset):
+        return True
+    if origin is collections.abc.Sequence:
+        return True
+    if origin is Union or origin is types.UnionType:
+        return any(
+            _is_repeated_header_annotation(arg) for arg in get_args(annotation)
+        )
+    return False
+
+
+def _get_header_field_key(field_name: str, field_info: FieldInfo) -> str:
+    validation_alias = field_info.validation_alias
+    if isinstance(validation_alias, str):
+        return validation_alias
+    if field_info.alias:
+        return field_info.alias
+    return field_name
+
+
+def build_response_headers_data(
+    model: type[BaseModel], raw_headers: Any
+) -> dict[str, Any]:
+    """
+    Build the input dict used to validate a `response_headers_model` from the
+    raw headers of the response about to be sent.
+
+    Merging rules:
+
+    * Header names are matched case-insensitively, `_` in field names matches
+      `-` in header names.
+    * Fields declared with a sequence type (e.g. `list[str]`) receive all the
+      lines of the header, in order (repeated headers).
+    * Scalar fields for headers other than `Set-Cookie` receive the combined
+      `", "`-joined value when the header has multiple lines (RFC 9110).
+    * `Set-Cookie` is never combined: a scalar field receives the last line,
+      use a sequence field (e.g. `list[str]`) to receive every cookie line.
+    """
+    grouped: dict[str, list[str]] = {}
+    for raw_name, raw_value in raw_headers:
+        name = (
+            raw_name.decode("latin-1") if isinstance(raw_name, bytes) else raw_name
+        )
+        value = (
+            raw_value.decode("latin-1")
+            if isinstance(raw_value, bytes)
+            else raw_value
+        )
+        grouped.setdefault(name.lower(), []).append(value)
+    data: dict[str, Any] = {}
+    for field_name, field_info in model.model_fields.items():
+        key = _get_header_field_key(field_name, field_info)
+        normalized = normalize_header_name(key)
+        values = grouped.get(normalized)
+        if values is None:
+            continue
+        if _is_repeated_header_annotation(field_info.annotation):
+            data[key] = values
+        elif normalized == "set-cookie":
+            data[key] = values[-1]
+        elif len(values) > 1:
+            data[key] = ", ".join(values)
+        else:
+            data[key] = values[0]
+    return data
+
+
+def validate_response_headers(
+    *,
+    field: ModelField,
+    raw_headers: Any,
+    endpoint_ctx: EndpointContext | None = None,
+) -> None:
+    """
+    Validate the headers of a response against its `response_headers_model`
+    right before it is sent, raising `ResponseValidationError` if they don't
+    match the declared model.
+    """
+    model = field.field_info.annotation
+    assert isinstance(model, type) and issubclass(model, BaseModel)
+    data = build_response_headers_data(model, raw_headers)
+    _, errors = field.validate(data, {}, loc=("response_headers",))
+    if errors:
+        ctx = endpoint_ctx or EndpointContext()
+        raise ResponseValidationError(errors=errors, endpoint_ctx=ctx)
 
 
 def generate_operation_id_for_path(

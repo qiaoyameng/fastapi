@@ -1168,6 +1168,7 @@ class FastAPI(Starlette):
         endpoint: Callable[..., Any],
         *,
         response_model: Any = Default(None),
+        response_headers_model: Any = None,
         status_code: int | None = None,
         tags: list[str | Enum] | None = None,
         dependencies: Sequence[Depends] | None = None,
@@ -1196,6 +1197,7 @@ class FastAPI(Starlette):
             path,
             endpoint=endpoint,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -1303,6 +1305,7 @@ class FastAPI(Starlette):
         path: str,
         *,
         response_model: Any = Default(None),
+        response_headers_model: Any = None,
         status_code: int | None = None,
         tags: list[str | Enum] | None = None,
         dependencies: Sequence[Depends] | None = None,
@@ -1332,6 +1335,7 @@ class FastAPI(Starlette):
                 path,
                 func,
                 response_model=response_model,
+                response_headers_model=response_headers_model,
                 status_code=status_code,
                 tags=tags,
                 dependencies=dependencies,
@@ -1690,6 +1694,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -1993,6 +2021,7 @@ class FastAPI(Starlette):
         return self.router.get(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -2063,6 +2092,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -2371,6 +2424,7 @@ class FastAPI(Starlette):
         return self.router.put(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -2441,6 +2495,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -2749,6 +2827,7 @@ class FastAPI(Starlette):
         return self.router.post(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -2819,6 +2898,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -3122,6 +3225,7 @@ class FastAPI(Starlette):
         return self.router.delete(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -3192,6 +3296,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -3495,6 +3623,7 @@ class FastAPI(Starlette):
         return self.router.options(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -3565,6 +3694,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -3868,6 +4021,7 @@ class FastAPI(Starlette):
         return self.router.head(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -3938,6 +4092,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -4246,6 +4424,7 @@ class FastAPI(Starlette):
         return self.router.patch(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,
@@ -4316,6 +4495,30 @@ class FastAPI(Starlette):
                 """
             ),
         ] = Default(None),
+        response_headers_model: Annotated[
+            Any,
+            Doc(
+                """
+                A Pydantic model class used to declare and validate the
+                response headers.
+
+                Each field declares a response header: the field name (or its
+                alias) is the header name, matched case-insensitively (`_` in
+                field names matches `-` in header names). Fields without a
+                default are required headers. Fields declared with a sequence
+                type (e.g. `list[str]`) receive repeated header lines.
+
+                The final headers are validated right before the response is
+                sent, including for `HEAD` and `204` responses and for
+                `Response` objects returned directly. If validation fails, a
+                `ResponseValidationError` is raised (resulting in a 500
+                error).
+
+                It is also used to document the response headers in the
+                generated OpenAPI.
+                """
+            ),
+        ] = None,
         status_code: Annotated[
             int | None,
             Doc(
@@ -4619,6 +4822,7 @@ class FastAPI(Starlette):
         return self.router.trace(
             path,
             response_model=response_model,
+            response_headers_model=response_headers_model,
             status_code=status_code,
             tags=tags,
             dependencies=dependencies,

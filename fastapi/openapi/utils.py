@@ -85,6 +85,68 @@ status_code_ranges: dict[str, str] = {
 }
 
 
+def _inline_json_schema_defs(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Inline local `$defs` references (`#/$defs/...`) in a JSON Schema, so the
+    schema can be embedded in an OpenAPI document without registering extra
+    components.
+    """
+    defs = schema.pop("$defs", None)
+    if not defs:
+        return schema
+
+    def _resolve(node: Any, seen: set[str]) -> Any:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                ref_name = ref[len("#/$defs/") :]
+                if ref_name in defs and ref_name not in seen:
+                    resolved = _resolve(copy.deepcopy(defs[ref_name]), seen | {ref_name})
+                    siblings = {
+                        key: _resolve(value, seen)
+                        for key, value in node.items()
+                        if key != "$ref"
+                    }
+                    return {**resolved, **siblings}
+            return {key: _resolve(value, seen) for key, value in node.items()}
+        if isinstance(node, list):
+            return [_resolve(item, seen) for item in node]
+        return node
+
+    return _resolve(schema, set())
+
+
+def get_openapi_response_headers(model: type[BaseModel]) -> dict[str, Any]:
+    """
+    Build the OpenAPI `headers` map of a response from a
+    `response_headers_model` (a Pydantic model class), using the same
+    declaration that is used to validate the headers at runtime.
+    """
+    json_schema = model.model_json_schema(mode="validation")
+    json_schema = _inline_json_schema_defs(json_schema)
+    properties = json_schema.get("properties", {})
+    required = set(json_schema.get("required", []))
+    headers: dict[str, Any] = {}
+    for field_name, field_info in model.model_fields.items():
+        validation_alias = field_info.validation_alias
+        alias = validation_alias if isinstance(validation_alias, str) else None
+        alias = alias or field_info.alias
+        prop_name = alias or field_name
+        prop_schema = properties.get(prop_name)
+        if prop_schema is None:
+            continue
+        # Field names without an explicit alias map to header names with
+        # dashes instead of underscores
+        header_name = prop_name if alias else field_name.replace("_", "-")
+        header: dict[str, Any] = {"schema": prop_schema}
+        if prop_name in required:
+            header["required"] = True
+        if field_info.description:
+            header["description"] = field_info.description
+        headers[header_name] = header
+    return headers
+
+
 @dataclass
 class _OpenAPIDependencyData:
     path_params: list[ModelField] = field(default_factory=list)
@@ -470,6 +532,14 @@ def get_openapi_path(
                     ).setdefault("content", {}).setdefault(
                         route_response_media_type, {}
                     )["schema"] = response_schema
+            if route.response_headers_model is not None:
+                response_headers = get_openapi_response_headers(
+                    route.response_headers_model
+                )
+                if response_headers:
+                    operation.setdefault("responses", {}).setdefault(status_code, {})[
+                        "headers"
+                    ] = response_headers
             if route.responses:
                 operation_responses = operation.setdefault("responses", {})
                 for (
