@@ -214,6 +214,26 @@ def _get_openapi_operation_parameters(
                 "required": param.field_info.is_required(),
                 "schema": param_schema,
             }
+            param_style = getattr(field_info, "style", None)
+            if param_style is not None:
+                parameter["style"] = param_style
+                param_explode = getattr(field_info, "explode", None)
+                if param_explode is not None:
+                    parameter["explode"] = param_explode
+                elif param_style == "deepObject":
+                    # deepObject is only defined with explode=true in OpenAPI
+                    parameter["explode"] = True
+                if (
+                    param_style == "deepObject"
+                    and parameter["required"]
+                    and lenient_issubclass(field_info.annotation, BaseModel)
+                ):
+                    # A deepObject parameter is only required if the model itself
+                    # cannot be built entirely from its defaults
+                    parameter["required"] = any(
+                        model_field.is_required()
+                        for model_field in field_info.annotation.model_fields.values()
+                    )
             if field_info.description:
                 parameter["description"] = field_info.description
             openapi_examples = getattr(field_info, "openapi_examples", None)

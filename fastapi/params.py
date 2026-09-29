@@ -69,6 +69,8 @@ class Param(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cl
         deprecated: deprecated | str | bool | None = None,
         include_in_schema: bool = True,
         json_schema_extra: dict[str, Any] | None = None,
+        style: str | None = None,
+        explode: bool | None = None,
         **extra: Any,
     ):
         if example is not _Unset:
@@ -80,6 +82,8 @@ class Param(FieldInfo):  # type: ignore[misc]  # ty: ignore[subclass-of-final-cl
         self.example = example
         self.include_in_schema = include_in_schema
         self.openapi_examples = openapi_examples
+        self.style = style
+        self.explode = explode
         kwargs = dict(
             default=default,
             default_factory=default_factory,
@@ -264,6 +268,8 @@ class Query(Param):  # type: ignore[misc]
         deprecated: deprecated | str | bool | None = None,
         include_in_schema: bool = True,
         json_schema_extra: dict[str, Any] | None = None,
+        style: str | None = None,
+        explode: bool | None = None,
         **extra: Any,
     ):
         super().__init__(
@@ -296,6 +302,8 @@ class Query(Param):  # type: ignore[misc]
             openapi_examples=openapi_examples,
             include_in_schema=include_in_schema,
             json_schema_extra=json_schema_extra,
+            style=style,
+            explode=explode,
             **extra,
         )
 

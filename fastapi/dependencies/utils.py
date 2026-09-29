@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import re
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -154,12 +155,120 @@ def _get_flat_body_params(dependant: Dependant) -> list[ModelField]:
     return body_params
 
 
+_deep_object_key_pattern = re.compile(r"^([^\[\]]+)((?:\[[^\[\]]*\])*)$")
+
+
+def _is_deep_object_field(field: ModelField) -> bool:
+    return getattr(field.field_info, "style", None) == "deepObject"
+
+
+def _parse_deep_object_key(key: str) -> tuple[str, list[str]] | None:
+    match = _deep_object_key_pattern.match(key)
+    if not match:
+        return None
+    root, brackets = match.groups()
+    segments = re.findall(r"\[([^\[\]]*)\]", brackets)
+    return root, segments
+
+
+def _get_deep_object_value(
+    *,
+    received_params: Mapping[str, Any] | QueryParams | Headers,
+    alias: str,
+    loc_prefix: str,
+) -> tuple[Any, list[Any], set[str]]:
+    deep_object: dict[str, Any] = {}
+    errors: list[Any] = []
+    consumed_keys: set[str] = set()
+    root_scalar_values: list[Any] = []
+    found = False
+    for key in received_params.keys():
+        parsed = _parse_deep_object_key(key)
+        if parsed is None:
+            continue
+        root, segments = parsed
+        if root != alias:
+            continue
+        found = True
+        consumed_keys.add(key)
+        if isinstance(received_params, (ImmutableMultiDict, Headers)):
+            key_values: list[Any] = list(received_params.getlist(key))
+        else:
+            key_values = [received_params.get(key)]
+        loc = (loc_prefix, alias, *segments)
+        if not segments:
+            root_scalar_values.extend(key_values)
+            continue
+        if any(segment == "" for segment in segments):
+            errors.append(
+                {
+                    "type": "deep_object_array_not_supported",
+                    "loc": loc,
+                    "msg": "Arrays are not supported in deepObject query parameters",
+                    "input": key,
+                }
+            )
+            continue
+        node = deep_object
+        conflict = False
+        for segment in segments[:-1]:
+            existing = node.get(segment)
+            if existing is None:
+                node[segment] = {}
+                node = node[segment]
+            elif isinstance(existing, dict):
+                node = existing
+            else:
+                conflict = True
+                break
+        if not conflict:
+            leaf = segments[-1]
+            if leaf in node or len(key_values) > 1:
+                conflict = True
+            else:
+                node[leaf] = key_values[0]
+        if conflict:
+            errors.append(
+                {
+                    "type": "deep_object_conflict",
+                    "loc": loc,
+                    "msg": (
+                        "Conflicting scalar and object values in deepObject"
+                        " query parameter"
+                    ),
+                    "input": key,
+                }
+            )
+    if not found:
+        # Match the behavior of non-embedded Pydantic model query parameters:
+        # validate an empty object so model defaults apply when no keys are sent
+        return {}, errors, consumed_keys
+    if root_scalar_values:
+        if deep_object or len(root_scalar_values) > 1:
+            errors.append(
+                {
+                    "type": "deep_object_conflict",
+                    "loc": (loc_prefix, alias),
+                    "msg": (
+                        "Conflicting scalar and object values in deepObject"
+                        " query parameter"
+                    ),
+                    "input": root_scalar_values,
+                }
+            )
+            return None, errors, consumed_keys
+        return root_scalar_values[0], errors, consumed_keys
+    return deep_object, errors, consumed_keys
+
+
 def _get_flat_fields_from_params(fields: list[ModelField]) -> list[ModelField]:
     if not fields:
         return fields
     first_field = fields[0]
-    if len(fields) == 1 and lenient_issubclass(
-        first_field.field_info.annotation, BaseModel
+    if (
+        len(fields) == 1
+        and lenient_issubclass(first_field.field_info.annotation, BaseModel)
+        and not _is_deep_object_field(first_field)
     ):
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
         return fields_to_extract
@@ -538,11 +647,19 @@ def analyze_param(
                 "Path params must be of one of the supported types"
             )
         elif isinstance(field_info, params.Query):
-            assert (
-                is_scalar_field(field)
-                or field_annotation_is_scalar_sequence(field.field_info.annotation)
-                or lenient_issubclass(field.field_info.annotation, BaseModel)
-            ), f"Query parameter {param_name!r} must be one of the supported types"
+            if getattr(field_info, "style", None) == "deepObject":
+                assert lenient_issubclass(field.field_info.annotation, BaseModel), (
+                    f"Query parameter {param_name!r} with style='deepObject' must be "
+                    "a Pydantic model"
+                )
+            else:
+                assert (
+                    is_scalar_field(field)
+                    or field_annotation_is_scalar_sequence(
+                        field.field_info.annotation
+                    )
+                    or lenient_issubclass(field.field_info.annotation, BaseModel)
+                ), f"Query parameter {param_name!r} must be one of the supported types"
 
     return ParamDetails(type_annotation=type_annotation, depends=depends, field=field)
 
@@ -787,6 +904,36 @@ def request_params_to_args(
     if not fields:
         return values, errors
 
+    deep_object_consumed_keys: set[str] = set()
+    deep_object_fields = [field for field in fields if _is_deep_object_field(field)]
+    if deep_object_fields:
+        fields = [field for field in fields if not _is_deep_object_field(field)]
+        for field in deep_object_fields:
+            field_info = field.field_info
+            assert isinstance(field_info, params.Param), (
+                "Params must be subclasses of Param"
+            )
+            alias = get_validation_alias(field)
+            value, deep_object_errors, consumed_keys = _get_deep_object_value(
+                received_params=received_params,
+                alias=alias,
+                loc_prefix=field_info.in_.value,
+            )
+            deep_object_consumed_keys.update(consumed_keys)
+            if deep_object_errors:
+                errors.extend(deep_object_errors)
+                continue
+            loc = (field_info.in_.value, alias)
+            v_, errors_ = _validate_value_with_model_field(
+                field=field, value=value, values=values, loc=loc
+            )
+            if errors_:
+                errors.extend(errors_)
+            else:
+                values[field.name] = v_
+        if not fields:
+            return values, errors
+
     first_field = fields[0]
     fields_to_extract = fields
     single_not_embedded_field = False
@@ -826,6 +973,8 @@ def request_params_to_args(
         # header name and the original field alias as processed to avoid
         # accepting the original alias as an extra header.
         processed_keys.add(get_validation_alias(field))
+
+    processed_keys.update(deep_object_consumed_keys)
 
     for key in received_params.keys():
         if key not in processed_keys:

@@ -651,6 +651,33 @@ def Query(  # noqa: N802
             """
         ),
     ] = None,
+    style: Annotated[
+        str | None,
+        Doc(
+            """
+            The serialization style of the query parameter, as defined by OpenAPI.
+
+            Use `style="deepObject"` on a Pydantic model parameter to read nested
+            objects from bracket query keys, e.g. `filter[name]=a` is parsed as
+            `{"name": "a"}` and validated against the model.
+
+            When not set, query parameters are handled with the default `form`
+            style and bracket keys are treated as plain parameter names.
+            """
+        ),
+    ] = None,
+    explode: Annotated[
+        bool | None,
+        Doc(
+            """
+            The `explode` modifier of the query parameter serialization style,
+            as defined by OpenAPI.
+
+            For `style="deepObject"` it is always `true`, as required by the
+            OpenAPI specification.
+            """
+        ),
+    ] = None,
     **extra: Annotated[
         Any,
         Doc(
@@ -694,6 +721,8 @@ def Query(  # noqa: N802
         deprecated=deprecated,
         include_in_schema=include_in_schema,
         json_schema_extra=json_schema_extra,
+        style=style,
+        explode=explode,
         **extra,
     )
 

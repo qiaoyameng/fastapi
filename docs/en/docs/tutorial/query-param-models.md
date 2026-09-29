@@ -57,6 +57,30 @@ They will receive an **error** response telling them that the query parameter `t
 }
 ```
 
+## Nested Query Parameters with `deepObject` { #nested-query-parameters-with-deepobject }
+
+If your query parameter model has **nested models**, you can declare it with `Query(style="deepObject")` to read the nested data from **bracket query keys**, following the OpenAPI `deepObject` serialization style.
+
+{* ../../docs_src/query_param_models/tutorial003_an_py310.py hl[15] *}
+
+With this, a request like:
+
+```http
+https://example.com/items/?filter[name]=a&filter[range][min]=3
+```
+
+is parsed as the nested object `{"name": "a", "range": {"min": 3}}` and validated against the `FilterParams` model, so you get the typed model directly, with all the existing validations, aliases, and defaults applied.
+
+The generated OpenAPI will declare the parameter with `style: deepObject` and `explode: true`.
+
+/// note
+
+Only nested **objects** with **scalar** leaf values are supported. Arrays (e.g. `filter[tags][]=a`) and conflicting scalar/object paths (e.g. `filter[name]=a` together with `filter[name][sub]=b`) are rejected with a `422` error.
+
+Without `style="deepObject"`, query parameters keep the default behavior, and bracket keys are treated as plain parameter names.
+
+///
+
 ## Summary { #summary }
 
 You can use **Pydantic models** to declare **query parameters** in **FastAPI**. 😎
