@@ -9,6 +9,7 @@ from typing import Any, Literal, cast
 from fastapi import routing
 from fastapi._compat import (
     ModelField,
+    get_cached_model_fields,
     get_definitions,
     get_flat_models_from_fields,
     get_model_name_map,
@@ -253,6 +254,9 @@ def get_openapi_operation_request_body(
     if required:
         request_body_oai["required"] = required
     request_media_content: dict[str, Any] = {"schema": body_schema}
+    encoding = _get_form_fields_encoding(body_field=body_field)
+    if encoding:
+        request_media_content["encoding"] = encoding
     if field_info.openapi_examples:
         request_media_content["examples"] = jsonable_encoder(
             field_info.openapi_examples
@@ -261,6 +265,23 @@ def get_openapi_operation_request_body(
         request_media_content["example"] = jsonable_encoder(field_info.example)
     request_body_oai["content"] = {request_media_type: request_media_content}
     return request_body_oai
+
+
+def _get_form_fields_encoding(*, body_field: ModelField) -> dict[str, Any]:
+    """
+    Get the OpenAPI `encoding` map for form fields that declare a custom part
+    content type (e.g. `Form(content_type="application/json")`), so clients
+    know how to send each multipart/form-data part.
+    """
+    encoding: dict[str, Any] = {}
+    annotation = body_field.field_info.annotation
+    if not lenient_issubclass(annotation, BaseModel):
+        return encoding
+    for model_field in get_cached_model_fields(annotation):
+        content_type = getattr(model_field.field_info, "content_type", None)
+        if content_type:
+            encoding[get_validation_alias(model_field)] = {"contentType": content_type}
+    return encoding
 
 
 def generate_operation_id(
