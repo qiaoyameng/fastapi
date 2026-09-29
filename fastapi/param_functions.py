@@ -1680,6 +1680,23 @@ def Form(  # noqa: N802
             """
         ),
     ] = "application/x-www-form-urlencoded",
+    content_type: Annotated[
+        str | None,
+        Doc(
+            """
+            The content type of this individual form field (part) when sending
+            `multipart/form-data`.
+
+            If set to `application/json` (or another JSON media type), the part's
+            content will be decoded as JSON and validated against the declared
+            type (e.g. a Pydantic model), while the rest of the form fields keep
+            the normal form parsing behavior.
+
+            It will also be used to generate the OpenAPI `encoding` information
+            for this field.
+            """
+        ),
+    ] = None,
     alias: Annotated[
         str | None,
         Doc(
@@ -1935,6 +1952,7 @@ def Form(  # noqa: N802
         default=default,
         default_factory=default_factory,
         media_type=media_type,
+        content_type=content_type,
         alias=alias,
         alias_priority=alias_priority,
         validation_alias=validation_alias,

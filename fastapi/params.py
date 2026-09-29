@@ -586,6 +586,7 @@ class Form(Body):  # type: ignore[misc]
         default_factory: Callable[[], Any] | None = _Unset,
         annotation: Any | None = None,
         media_type: str = "application/x-www-form-urlencoded",
+        content_type: str | None = None,
         alias: str | None = None,
         alias_priority: int | None = _Unset,
         validation_alias: str | AliasPath | AliasChoices | None = None,
@@ -625,6 +626,7 @@ class Form(Body):  # type: ignore[misc]
         json_schema_extra: dict[str, Any] | None = None,
         **extra: Any,
     ):
+        self.content_type = content_type
         super().__init__(
             default=default,
             default_factory=default_factory,

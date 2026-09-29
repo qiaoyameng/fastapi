@@ -33,7 +33,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import FastAPIDeprecationWarning
 from fastapi.openapi.constants import METHODS_WITH_BODY, REF_PREFIX
 from fastapi.openapi.models import OpenAPI
-from fastapi.params import Body, ParamTypes
+from fastapi.params import Body, Form, ParamTypes
 from fastapi.responses import Response
 from fastapi.sse import _SSE_EVENT_SCHEMA
 from fastapi.types import DependencyCacheKey, ModelNameMap
@@ -253,6 +253,10 @@ def get_openapi_operation_request_body(
     if required:
         request_body_oai["required"] = required
     request_media_content: dict[str, Any] = {"schema": body_schema}
+    if isinstance(field_info, Form):
+        encoding = _get_form_fields_encoding(body_field)
+        if encoding:
+            request_media_content["encoding"] = encoding
     if field_info.openapi_examples:
         request_media_content["examples"] = jsonable_encoder(
             field_info.openapi_examples
@@ -261,6 +265,28 @@ def get_openapi_operation_request_body(
         request_media_content["example"] = jsonable_encoder(field_info.example)
     request_body_oai["content"] = {request_media_type: request_media_content}
     return request_body_oai
+
+
+def _get_form_fields_encoding(body_field: ModelField) -> dict[str, Any]:
+    """
+    Get the OpenAPI `encoding` map for form fields declared with an explicit
+    content type (e.g. `application/json`), so clients know how to send each
+    part of a `multipart/form-data` or `application/x-www-form-urlencoded`
+    request body.
+    """
+    annotation = body_field.field_info.annotation
+    if not lenient_issubclass(annotation, BaseModel):
+        return {}
+    encoding: dict[str, Any] = {}
+    for name, sub_field_info in annotation.model_fields.items():
+        content_type = getattr(sub_field_info, "content_type", None)
+        if not content_type:
+            continue
+        alias = sub_field_info.validation_alias
+        if not isinstance(alias, str):
+            alias = sub_field_info.alias
+        encoding[alias or name] = {"contentType": content_type}
+    return encoding
 
 
 def generate_operation_id(

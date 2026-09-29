@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+import json
 import sys
 from collections.abc import (
     AsyncGenerator,
@@ -746,6 +747,35 @@ def _is_json_field(field: ModelField) -> bool:
     return any(type(item) is Json for item in field.field_info.metadata)
 
 
+def _is_json_content_type(content_type: str) -> bool:
+    media_type = content_type.split(";")[0].strip()
+    maintype, _, subtype = media_type.partition("/")
+    return maintype == "application" and (
+        subtype == "json" or subtype.endswith("+json")
+    )
+
+
+def _is_json_form_field(field: ModelField) -> bool:
+    """
+    Check if a form field was declared with a JSON content type, meaning its
+    part(s) should be decoded as JSON instead of using the normal form parsing.
+    """
+    field_info = field.field_info
+    if not isinstance(field_info, params.Form):
+        return False
+    content_type = getattr(field_info, "content_type", None)
+    if not content_type or not _is_json_content_type(content_type):
+        return False
+    annotation = field_info.annotation
+    # File-like fields keep the normal file handling
+    return not (
+        is_uploadfile_or_nonable_uploadfile_annotation(annotation)
+        or is_uploadfile_sequence_annotation(annotation)
+        or is_bytes_or_nonable_bytes_annotation(annotation)
+        or is_bytes_sequence_annotation(annotation)
+    )
+
+
 def _get_multidict_value(
     field: ModelField, values: Mapping[str, Any], alias: str | None = None
 ) -> Any:
@@ -906,16 +936,87 @@ def _should_embed_body_fields(fields: list[ModelField]) -> bool:
         and not is_union_of_base_models(first_field.field_info.annotation)
     ):
         return True
+    # A Form field with a JSON content type is sent as a single named part (or
+    # several parts for a list), so it has to be embedded even if it's a BaseModel
+    if _is_json_form_field(first_field):
+        return True
     return False
+
+
+async def _extract_json_form_field(
+    field: ModelField, received_body: FormData
+) -> tuple[Any, list[dict[str, Any]]]:
+    """
+    Extract and JSON-decode the part(s) of a form field declared with a JSON
+    content type.
+
+    Returns the decoded value (a single item or a list for sequence
+    annotations) and a list of errors. If the JSON decoding of a part fails,
+    the UploadFiles received up to that point are closed before returning the
+    error, so they don't leak.
+    """
+    alias = get_validation_alias(field)
+    is_sequence = field_annotation_is_sequence(field.field_info.annotation)
+    raw_values: list[Any]
+    if is_sequence:
+        raw_values = list(received_body.getlist(alias))
+    else:
+        raw_value = received_body.get(alias)
+        raw_values = [raw_value] if raw_value is not None else []
+    if not raw_values:
+        return None, []
+    decoded_values: list[Any] = []
+    received_files: list[UploadFile] = []
+    for index, raw_value in enumerate(raw_values):
+        if isinstance(raw_value, UploadFile):
+            received_files.append(raw_value)
+            content: str | bytes = await raw_value.read()
+        else:
+            content = raw_value
+        try:
+            decoded_values.append(json.loads(content))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            for received_file in received_files:
+                await received_file.close()
+            loc: tuple[Any, ...] = ("body", alias)
+            if is_sequence:
+                loc = ("body", alias, index)
+            error_msg = e.msg if isinstance(e, json.JSONDecodeError) else str(e)
+            return None, [
+                {
+                    "type": "json_invalid",
+                    "loc": loc,
+                    "msg": "JSON decode error",
+                    "input": {},
+                    "ctx": {"error": error_msg},
+                }
+            ]
+    if is_sequence:
+        return decoded_values, []
+    return decoded_values[0], []
 
 
 async def _extract_form_body(
     body_fields: list[ModelField],
     received_body: FormData,
-) -> dict[str, Any]:
-    values = {}
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
+    values: dict[str, Any] = {}
+    errors: list[dict[str, Any]] = []
+    failed_aliases: set[str] = set()
 
     for field in body_fields:
+        if _is_json_form_field(field):
+            alias = get_validation_alias(field)
+            json_value, json_errors = await _extract_json_form_field(
+                field, received_body
+            )
+            if json_errors:
+                errors.extend(json_errors)
+                failed_aliases.add(alias)
+                continue
+            if json_value is not None:
+                values[alias] = json_value
+            continue
         value = _get_multidict_value(field, received_body)
         field_info = field.field_info
         if (
@@ -945,7 +1046,7 @@ async def _extract_form_body(
                 values[key] = param_values[0]
             else:
                 values[key] = param_values
-    return values
+    return values, errors, failed_aliases
 
 
 async def request_body_to_args(
@@ -969,21 +1070,28 @@ async def request_body_to_args(
     ):
         fields_to_extract = get_cached_model_fields(first_field.field_info.annotation)
 
+    failed_aliases: set[str] = set()
     if isinstance(received_body, FormData):
-        body_to_process = await _extract_form_body(fields_to_extract, received_body)
+        body_to_process, form_errors, failed_aliases = await _extract_form_body(
+            fields_to_extract, received_body
+        )
+        errors.extend(form_errors)
 
     if single_not_embedded_field:
         loc: tuple[str, ...] = ("body",)
         v_, errors_ = _validate_value_with_model_field(
             field=first_field, value=body_to_process, values=values, loc=loc
         )
-        return {first_field.name: v_}, errors_
+        return {first_field.name: v_}, errors + errors_
     for field in body_fields:
-        loc = ("body", get_validation_alias(field))
+        alias = get_validation_alias(field)
+        if alias in failed_aliases:
+            continue
+        loc = ("body", alias)
         value: Any | None = None
         if body_to_process is not None and not isinstance(body_to_process, bytes):
             try:
-                value = body_to_process.get(get_validation_alias(field))
+                value = body_to_process.get(alias)
             # If the received body is a list, not a dict
             except AttributeError:
                 errors.append(get_missing_field_error(loc))
